@@ -4,12 +4,11 @@
 #include <cctype>
 #include <limits>
 #include <set>
+#include <string_view>
 
 namespace {
 
-constexpr const char* kProtoSuffix = ".proto";
-constexpr size_t kProtoSuffixSize = 6;
-constexpr size_t kMaxBackwardSearch = 4096;
+constexpr std::string_view kProtoSuffix = ".proto";
 constexpr size_t kMaxNestedDepth = 16;
 
 struct VarintResult {
@@ -32,6 +31,9 @@ struct ParseResult {
     bool hasName = false;
     bool hasSignal = false;
     bool hasMessageLikeField = false;
+    bool hasSyntax = false;
+    bool hasPackage = false;
+    bool hasDependency = false;
     size_t end = 0;
     int score = 0;
     std::string name;
@@ -65,8 +67,7 @@ VarintResult ReadVarint(const std::vector<uint8_t>& data, size_t pos, size_t lim
 
 bool EndsWithProto(const std::string& value)
 {
-    return value.size() >= kProtoSuffixSize &&
-        value.compare(value.size() - kProtoSuffixSize, kProtoSuffixSize, kProtoSuffix) == 0;
+    return std::string_view(value).ends_with(kProtoSuffix);
 }
 
 bool IsPrintableAsciiString(const std::string& value)
@@ -96,6 +97,18 @@ bool IsValidProtoName(const std::string& value)
     }
 
     return true;
+}
+
+bool IsPathLikeProtoName(const std::string& value)
+{
+    if (!IsValidProtoName(value))
+        return false;
+
+    if (value.find('/') != std::string::npos || value.find('\\') != std::string::npos)
+        return true;
+
+    auto stem = std::string_view(value).substr(0, value.size() - kProtoSuffix.size());
+    return stem.find('.') == std::string::npos;
 }
 
 bool IsLikelyIdentifierPath(const std::string& value)
@@ -181,14 +194,6 @@ bool IsMessageLikeField(uint32_t fieldNumber)
 {
     return fieldNumber == 4 || fieldNumber == 5 || fieldNumber == 6 ||
         fieldNumber == 7 || fieldNumber == 8 || fieldNumber == 9;
-}
-
-bool HasProtoAt(const std::vector<uint8_t>& data, size_t pos)
-{
-    if (pos + kProtoSuffixSize > data.size())
-        return false;
-
-    return std::equal(kProtoSuffix, kProtoSuffix + kProtoSuffixSize, data.begin() + pos);
 }
 
 FieldSpan ReadFieldSpan(const std::vector<uint8_t>& data, size_t pos, size_t limit)
@@ -281,7 +286,7 @@ std::string ReadBytesAsString(const std::vector<uint8_t>& data, size_t start, si
     return std::string(reinterpret_cast<const char*>(data.data() + start), end - start);
 }
 
-bool IsPotentialNameStart(const std::vector<uint8_t>& data, size_t keyPos, size_t protoDotPos, size_t& nameEnd, std::string& name)
+bool IsPotentialNameStart(const std::vector<uint8_t>& data, size_t keyPos, size_t& nameEnd, std::string& name)
 {
     if (keyPos >= data.size() || data[keyPos] != 0x0A)
         return false;
@@ -296,9 +301,6 @@ bool IsPotentialNameStart(const std::vector<uint8_t>& data, size_t keyPos, size_
 
     size_t valueEnd = valueStart + static_cast<size_t>(length.value);
 
-    if (protoDotPos < valueStart || protoDotPos + kProtoSuffixSize != valueEnd)
-        return false;
-
     auto value = ReadBytesAsString(data, valueStart, valueEnd);
     if (!IsValidProtoName(value))
         return false;
@@ -308,16 +310,15 @@ bool IsPotentialNameStart(const std::vector<uint8_t>& data, size_t keyPos, size_
     return true;
 }
 
-std::vector<size_t> FindNameKeyPositions(const std::vector<uint8_t>& data, size_t protoDotPos)
+std::vector<size_t> FindNameKeyPositions(const std::vector<uint8_t>& data)
 {
     std::vector<size_t> positions;
-    size_t begin = protoDotPos > kMaxBackwardSearch ? protoDotPos - kMaxBackwardSearch : 0;
 
-    for (size_t keyPos = begin; keyPos < protoDotPos; ++keyPos)
+    for (size_t keyPos = 0; keyPos < data.size(); ++keyPos)
     {
         size_t nameEnd = 0;
         std::string name;
-        if (IsPotentialNameStart(data, keyPos, protoDotPos, nameEnd, name))
+        if (IsPotentialNameStart(data, keyPos, nameEnd, name))
             positions.push_back(keyPos);
     }
 
@@ -348,6 +349,7 @@ void ApplyFieldScore(const std::vector<uint8_t>& data, const FieldSpan& field, P
         if (IsSyntaxValue(value))
         {
             result.hasSignal = true;
+            result.hasSyntax = true;
             result.score += 25;
         }
         else
@@ -365,6 +367,7 @@ void ApplyFieldScore(const std::vector<uint8_t>& data, const FieldSpan& field, P
             if (IsValidProtoName(value))
             {
                 result.hasSignal = true;
+                result.hasDependency = true;
                 result.score += 12;
             }
             else
@@ -375,6 +378,8 @@ void ApplyFieldScore(const std::vector<uint8_t>& data, const FieldSpan& field, P
         else if (IsLikelyIdentifierPath(value))
         {
             result.hasSignal = true;
+            if (field.fieldNumber == 2)
+                result.hasPackage = true;
             result.score += 10;
         }
         else
@@ -404,6 +409,18 @@ void ApplyFieldScore(const std::vector<uint8_t>& data, const FieldSpan& field, P
         result.hasSignal = true;
         result.score += 5;
     }
+}
+
+bool HasAcceptableFdpShape(const ParseResult& result)
+{
+    if (!result.hasName || !result.hasSignal)
+        return false;
+
+    if (result.hasMessageLikeField)
+        return true;
+
+    return result.hasSyntax &&
+        (result.hasPackage || result.hasDependency || IsPathLikeProtoName(result.name));
 }
 
 bool LooksLikeExternalTerminator(uint32_t fieldNumber, uint32_t wireType)
@@ -458,7 +475,7 @@ ParseResult ParseCandidate(const std::vector<uint8_t>& data, size_t start)
 
     if (!result.hasName)
         result.reason = "缺少合法 name 字段";
-    else if (!result.hasSignal || !result.hasMessageLikeField)
+    else if (!HasAcceptableFdpShape(result))
         result.reason = "缺少 FDP 结构信号字段";
     else if (result.end <= start)
         result.reason = "未能解析字段边界";
@@ -489,7 +506,7 @@ bool IsOverlapped(const FdpCandidate& left, const FdpCandidate& right)
 std::string BuildReason(const ParseResult& parse)
 {
     std::string reason = parse.reason;
-    reason += parse.hasMessageLikeField ? "；包含消息/枚举/服务字段" : "；包含字符串/依赖信号";
+    reason += parse.hasMessageLikeField ? "；包含消息/枚举/服务字段" : "；包含 name/package/syntax 弱校验信号";
     return reason;
 }
 
@@ -500,29 +517,23 @@ std::vector<FdpCandidate> FindFileDescriptorProtos(const std::vector<uint8_t>& d
     std::vector<FdpCandidate> rawCandidates;
     std::set<size_t> visitedStarts;
 
-    for (size_t dotPos = 0; dotPos + kProtoSuffixSize <= data.size(); ++dotPos)
+    for (size_t start : FindNameKeyPositions(data))
     {
-        if (!HasProtoAt(data, dotPos))
+        if (visitedStarts.find(start) != visitedStarts.end())
             continue;
 
-        for (size_t start : FindNameKeyPositions(data, dotPos))
-        {
-            if (visitedStarts.find(start) != visitedStarts.end())
-                continue;
+        visitedStarts.insert(start);
+        auto parse = ParseCandidate(data, start);
+        if (!HasAcceptableFdpShape(parse) || parse.end <= start)
+            continue;
 
-            visitedStarts.insert(start);
-            auto parse = ParseCandidate(data, start);
-            if (!parse.hasName || !parse.hasSignal || !parse.hasMessageLikeField || parse.end <= start)
-                continue;
-
-            FdpCandidate candidate;
-            candidate.start = start;
-            candidate.end = parse.end;
-            candidate.name = parse.name;
-            candidate.score = parse.score;
-            candidate.reason = BuildReason(parse);
-            rawCandidates.push_back(candidate);
-        }
+        FdpCandidate candidate;
+        candidate.start = start;
+        candidate.end = parse.end;
+        candidate.name = parse.name;
+        candidate.score = parse.score;
+        candidate.reason = BuildReason(parse);
+        rawCandidates.push_back(candidate);
     }
 
     std::sort(rawCandidates.begin(), rawCandidates.end(), IsBetterCandidate);

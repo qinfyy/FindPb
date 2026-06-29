@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="FindPb/FindPb.vcxproj" Id="f3ff67b4-af8c-4da0-9277-bd7896bf3370" />
+</Solution>

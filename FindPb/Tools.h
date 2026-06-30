@@ -1,24 +1,28 @@
 #pragma once
 #include <windows.h>
-#include <tlhelp32.h>
-#include <iostream>
 #include <vector>
 #include <string>
-#include <cstdio>
+#include <filesystem>
 
-
-DWORD FindProcessId(const std::string& processName);
+bool TryParseProcessId(const std::string& value, DWORD& pid);
+DWORD ResolveProcessId(const std::string& processNameOrPid);
 
 bool IsReadable(DWORD protect);
 
-std::vector<uintptr_t> ScanMemory(HANDLE hProcess, const std::string& target);
+struct DumpSegment {
+    uintptr_t base = 0;
+    size_t fileOffset = 0;
+    size_t size = 0;
+};
 
-bool GetModuleInfo(DWORD pid, const std::string& moduleName, MODULEENTRY32W& out);
+struct ProcessDumpResult {
+    bool ok = false;
+    std::filesystem::path dumpPath;
+    size_t bytesWritten = 0;
+    size_t regionCount = 0;
+    size_t skippedRegionCount = 0;
+    std::vector<DumpSegment> segments;
+    std::string error;
+};
 
-std::vector<uintptr_t> ScanHeapMemory(HANDLE hProcess, const std::string& target);
-
-std::vector<uintptr_t> ScanModuleMemory(HANDLE hProcess, const std::string& moduleName, const std::string& target);
-
-void HexDump(HANDLE hProcess, uintptr_t dataPtr, SIZE_T backward, SIZE_T forward);
-
-std::vector<uintptr_t> ScanFile(const std::string& filePath, const std::string& target);
+ProcessDumpResult DumpProcessMemory(DWORD pid, const std::filesystem::path& dumpPath);

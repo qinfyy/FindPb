@@ -130,12 +130,10 @@
     <ClCompile Include="DescriptorFinder.cpp" />
     <ClCompile Include="FindPb.cpp" />
     <ClCompile Include="Tools.cpp" />
-    <ClCompile Include="Util.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="DescriptorFinder.h" />
     <ClInclude Include="Tools.h" />
-    <ClInclude Include="Util.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

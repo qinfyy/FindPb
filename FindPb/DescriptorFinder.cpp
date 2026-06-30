@@ -149,20 +149,20 @@ bool IsAllowedTopLevelField(uint32_t fieldNumber)
 {
     switch (fieldNumber)
     {
-    case 1:
-    case 2:
-    case 3:
-    case 4:
-    case 5:
-    case 6:
-    case 7:
-    case 8:
-    case 9:
-    case 10:
-    case 11:
-    case 12:
-    case 14:
-    case 15:
+    case 1:  // name
+    case 2:  // package
+    case 3:  // dependency
+    case 4:  // message_type
+    case 5:  // enum_type
+    case 6:  // service
+    case 7:  // extension
+    case 8:  // options
+    case 9:  // source_code_info
+    case 10: // public_dependency
+    case 11: // weak_dependency
+    case 12: // syntax
+    case 14: // edition
+    case 15: // option_dependency
         return true;
     default:
         return false;

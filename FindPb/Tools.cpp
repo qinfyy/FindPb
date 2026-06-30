@@ -1,13 +1,28 @@
 #include "Tools.h"
-#include "Util.h"
 #include <algorithm>
 #include <cctype>
 #include <limits>
 #include <tlhelp32.h>
 
-namespace {
+static std::wstring AnsiToUtf16(const std::string& str)
+{
+    if (str.empty())
+        return {};
 
-DWORD FindProcessId(const std::string& processName)
+    auto codePage = GetACP();
+    auto sizeNeeded = MultiByteToWideChar(codePage, 0, str.c_str(),
+        static_cast<int>(str.size()), nullptr, 0);
+    if (sizeNeeded <= 0)
+        return {};
+
+    std::wstring result(sizeNeeded, 0);
+    MultiByteToWideChar(codePage, 0, str.c_str(), static_cast<int>(str.size()),
+        result.data(), sizeNeeded);
+
+    return result;
+}
+
+static DWORD FindProcessId(const std::string& processName)
 {
     std::wstring wProcessName = AnsiToUtf16(processName);
 
@@ -33,8 +48,6 @@ DWORD FindProcessId(const std::string& processName)
     CloseHandle(snapshot);
     return 0;
 }
-
-}  // namespace
 
 bool TryParseProcessId(const std::string& value, DWORD& pid)
 {

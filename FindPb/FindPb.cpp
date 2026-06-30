@@ -78,9 +78,9 @@ bool WriteWholeFile(const std::filesystem::path& filePath, const uint8_t* data, 
 }
 
 struct Config {
-    std::string processName;    // 进程名（进程模式）
-    std::string filePath;       // 文件路径（文件模式）
-    std::string outputDir;      // 导出目录
+    std::string processName;
+    std::string filePath;
+    std::string outputDir;
     bool showUsage = false;
 };
 
@@ -117,7 +117,6 @@ bool ParseArgs(int argc, char* argv[], Config& cfg)
         }
     }
 
-    // 验证：必须指定进程或文件之一
     if (cfg.processName.empty() && cfg.filePath.empty())
     {
         std::cerr << "错误: 必须指定 --process 或 --file\n";
@@ -251,7 +250,6 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    // 文件模式
     if (!cfg.filePath.empty())
     {
         std::cout << "扫描文件: " << cfg.filePath << "\n";
@@ -271,7 +269,6 @@ int main(int argc, char* argv[])
         return ScanBufferAndExport(fileData, inputPath.filename(), outputDir);
     }
 
-    // 进程模式
     DWORD pid = ResolveProcessId(cfg.processName);
     if (pid == 0)
     {
@@ -279,9 +276,7 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    std::filesystem::path outputDir = cfg.outputDir.empty() ?
-        std::filesystem::current_path() :
-        std::filesystem::path(cfg.outputDir);
+    std::filesystem::path outputDir = cfg.outputDir.empty() ? std::filesystem::current_path() : std::filesystem::path(cfg.outputDir);
     std::error_code fsError;
     std::filesystem::create_directories(outputDir, fsError);
     if (fsError)
@@ -291,7 +286,7 @@ int main(int argc, char* argv[])
     }
 
     std::string dumpPrefix = SanitizeFileNamePart(cfg.processName.empty() ? "process" : cfg.processName);
-    std::filesystem::path dumpPath = outputDir / (dumpPrefix + "_" + std::to_string(pid) + ".dump.bin");
+    std::filesystem::path dumpPath = outputDir / (dumpPrefix + "_" + std::to_string(pid) + ".dump");
 
     std::cout << "PID: " << pid << "\n";
     std::cout << "进程内存 Dump: " << dumpPath.string() << "\n";

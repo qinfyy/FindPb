@@ -1,10 +1,19 @@
 ﻿#include "DescriptorFinder.h"
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
+#include <cstdint>
 #include <limits>
 #include <set>
 #include <string_view>
+
+#if defined(_M_X64) || defined(_M_IX86) || defined(__SSE2__)
+#include <emmintrin.h>
+#define FINDPB_HAS_SSE2 1
+#else
+#define FINDPB_HAS_SSE2 0
+#endif
 
 namespace {
 
@@ -65,12 +74,12 @@ VarintResult ReadVarint(const std::vector<uint8_t>& data, size_t pos, size_t lim
     return result;
 }
 
-bool EndsWithProto(const std::string& value)
+bool EndsWithProto(std::string_view value)
 {
-    return std::string_view(value).ends_with(kProtoSuffix);
+    return value.ends_with(kProtoSuffix);
 }
 
-bool IsPrintableAsciiString(const std::string& value)
+bool IsPrintableAsciiString(std::string_view value)
 {
     if (value.empty())
         return false;
@@ -84,7 +93,7 @@ bool IsPrintableAsciiString(const std::string& value)
     return true;
 }
 
-bool IsValidProtoName(const std::string& value)
+bool IsValidProtoName(std::string_view value)
 {
     if (!EndsWithProto(value) || !IsPrintableAsciiString(value))
         return false;
@@ -99,7 +108,7 @@ bool IsValidProtoName(const std::string& value)
     return true;
 }
 
-bool IsPathLikeProtoName(const std::string& value)
+bool IsPathLikeProtoName(std::string_view value)
 {
     if (!IsValidProtoName(value))
         return false;
@@ -107,11 +116,11 @@ bool IsPathLikeProtoName(const std::string& value)
     if (value.find('/') != std::string::npos || value.find('\\') != std::string::npos)
         return true;
 
-    auto stem = std::string_view(value).substr(0, value.size() - kProtoSuffix.size());
+    auto stem = value.substr(0, value.size() - kProtoSuffix.size());
     return stem.find('.') == std::string::npos;
 }
 
-bool IsLikelyIdentifierPath(const std::string& value)
+bool IsLikelyIdentifierPath(std::string_view value)
 {
     if (!IsPrintableAsciiString(value))
         return false;
@@ -301,12 +310,13 @@ bool IsPotentialNameStart(const std::vector<uint8_t>& data, size_t keyPos, size_
 
     size_t valueEnd = valueStart + static_cast<size_t>(length.value);
 
-    auto value = ReadBytesAsString(data, valueStart, valueEnd);
+    std::string_view value(reinterpret_cast<const char*>(data.data() + valueStart),
+        static_cast<size_t>(length.value));
     if (!IsValidProtoName(value))
         return false;
 
     nameEnd = valueEnd;
-    name = value;
+    name.assign(value);
     return true;
 }
 
@@ -314,7 +324,32 @@ std::vector<size_t> FindNameKeyPositions(const std::vector<uint8_t>& data)
 {
     std::vector<size_t> positions;
 
+#if FINDPB_HAS_SSE2
+    const uint8_t* bytes = data.data();
+    const __m128i target = _mm_set1_epi8(static_cast<char>(0x0A));
+    size_t pos = 0;
+    const size_t vectorEnd = data.size() & ~static_cast<size_t>(15);
+
+    for (; pos < vectorEnd; pos += 16)
+    {
+        const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes + pos));
+        int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, target));
+
+        while (mask != 0)
+        {
+            const size_t offset = static_cast<size_t>(std::countr_zero(static_cast<unsigned int>(mask)));
+            size_t nameEnd = 0;
+            std::string name;
+            if (IsPotentialNameStart(data, pos + offset, nameEnd, name))
+                positions.push_back(pos + offset);
+            mask &= mask - 1;
+        }
+    }
+
+    for (size_t keyPos = pos; keyPos < data.size(); ++keyPos)
+#else
     for (size_t keyPos = 0; keyPos < data.size(); ++keyPos)
+#endif
     {
         size_t nameEnd = 0;
         std::string name;
@@ -474,13 +509,13 @@ ParseResult ParseCandidate(const std::vector<uint8_t>& data, size_t start)
     }
 
     if (!result.hasName)
-        result.reason = "缺少合法 name 字段";
+        result.reason = "缺少合法名称字段";
     else if (!HasAcceptableFdpShape(result))
         result.reason = "缺少 FDP 结构信号字段";
     else if (result.end <= start)
         result.reason = "未能解析字段边界";
     else
-        result.reason = "name 锚点和字段结构校验通过";
+        result.reason = "名称和字段结构校验通过";
 
     return result;
 }

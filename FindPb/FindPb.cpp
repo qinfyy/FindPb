@@ -116,8 +116,6 @@ std::vector<PbField> ParsePb(const std::string& data)
     return result;
 }
 
-constexpr const char* DEFAULT_TARGET = ".proto";
-
 std::string SanitizeFileNamePart(const std::string& value)
 {
     std::string result;
@@ -280,7 +278,6 @@ int main(int argc, char* argv[])
     if (!cfg.filePath.empty())
     {
         std::cout << "扫描文件: " << cfg.filePath << "\n";
-        std::cout << "锚点: \"" << DEFAULT_TARGET << "\"\n\n";
 
         std::vector<uint8_t> fileData;
         if (!ReadWholeFile(cfg.filePath, fileData))

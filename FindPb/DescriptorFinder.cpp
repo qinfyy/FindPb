@@ -18,6 +18,7 @@
 namespace {
 
 constexpr std::string_view kProtoSuffix = ".proto";
+constexpr size_t kMaxBackwardExtend = 4096;
 constexpr size_t kMaxNestedDepth = 16;
 
 struct VarintResult {
@@ -458,15 +459,86 @@ bool HasAcceptableFdpShape(const ParseResult& result)
         (result.hasPackage || result.hasDependency || IsPathLikeProtoName(result.name));
 }
 
-bool LooksLikeExternalTerminator(uint32_t fieldNumber, uint32_t wireType)
+bool LooksLikeExternalTerminator(uint32_t fieldNumber, uint32_t wireType, bool hasName)
 {
     if (fieldNumber == 1 && wireType == 2)
-        return true;
+        return hasName;
 
     if (fieldNumber == 0 || wireType == 3 || wireType == 4 || wireType > 5)
         return true;
 
     return !IsAllowedTopLevelField(fieldNumber);
+}
+
+bool IsValidPreNameField(const std::vector<uint8_t>& data, const FieldSpan& field)
+{
+    if (!field.ok || field.fieldNumber == 1)
+        return false;
+
+    if (!IsAllowedTopLevelField(field.fieldNumber) ||
+        !IsTopLevelWireTypeValid(field.fieldNumber, field.wireType))
+    {
+        return false;
+    }
+
+    if (field.fieldNumber == 2 && field.wireType == 2)
+    {
+        auto value = ReadBytesAsString(data, field.valueStart, field.valueEnd);
+        return IsLikelyIdentifierPath(value);
+    }
+
+    if ((field.fieldNumber == 3 || field.fieldNumber == 15) && field.wireType == 2)
+    {
+        auto value = ReadBytesAsString(data, field.valueStart, field.valueEnd);
+        return IsValidProtoName(value);
+    }
+
+    if (field.fieldNumber == 12 && field.wireType == 2)
+    {
+        auto value = ReadBytesAsString(data, field.valueStart, field.valueEnd);
+        return IsSyntaxValue(value);
+    }
+
+    if (IsMessageLikeField(field.fieldNumber) && field.wireType == 2)
+        return IsGenericWireMessage(data, field.valueStart, field.valueEnd, 0);
+
+    return field.fieldNumber == 10 || field.fieldNumber == 11 || field.fieldNumber == 14;
+}
+
+bool CanReachNameAnchor(const std::vector<uint8_t>& data, size_t start, size_t nameStart)
+{
+    if (start >= nameStart)
+        return false;
+
+    size_t pos = start;
+    bool sawField = false;
+
+    while (pos < nameStart)
+    {
+        auto field = ReadFieldSpan(data, pos, nameStart);
+        if (!IsValidPreNameField(data, field) || field.next <= pos)
+            return false;
+
+        sawField = true;
+        pos = field.next;
+    }
+
+    return sawField && pos == nameStart;
+}
+
+std::vector<size_t> FindCandidateStartsForName(const std::vector<uint8_t>& data, size_t nameStart)
+{
+    std::vector<size_t> starts;
+    starts.push_back(nameStart);
+
+    size_t begin = nameStart > kMaxBackwardExtend ? nameStart - kMaxBackwardExtend : 0;
+    for (size_t start = begin; start < nameStart; ++start)
+    {
+        if (CanReachNameAnchor(data, start, nameStart))
+            starts.push_back(start);
+    }
+
+    return starts;
 }
 
 ParseResult ParseCandidate(const std::vector<uint8_t>& data, size_t start)
@@ -503,7 +575,7 @@ ParseResult ParseCandidate(const std::vector<uint8_t>& data, size_t start)
         if (pos < data.size())
         {
             auto next = ReadFieldSpan(data, pos, data.size());
-            if (!next.ok || LooksLikeExternalTerminator(next.fieldNumber, next.wireType))
+            if (!next.ok || LooksLikeExternalTerminator(next.fieldNumber, next.wireType, result.hasName))
                 break;
         }
     }
@@ -552,23 +624,26 @@ std::vector<FdpCandidate> FindFileDescriptorProtos(const std::vector<uint8_t>& d
     std::vector<FdpCandidate> rawCandidates;
     std::set<size_t> visitedStarts;
 
-    for (size_t start : FindNameKeyPositions(data))
+    for (size_t nameStart : FindNameKeyPositions(data))
     {
-        if (visitedStarts.find(start) != visitedStarts.end())
-            continue;
+        for (size_t start : FindCandidateStartsForName(data, nameStart))
+        {
+            if (visitedStarts.find(start) != visitedStarts.end())
+                continue;
 
-        visitedStarts.insert(start);
-        auto parse = ParseCandidate(data, start);
-        if (!HasAcceptableFdpShape(parse) || parse.end <= start)
-            continue;
+            visitedStarts.insert(start);
+            auto parse = ParseCandidate(data, start);
+            if (!HasAcceptableFdpShape(parse) || parse.end <= start)
+                continue;
 
-        FdpCandidate candidate;
-        candidate.start = start;
-        candidate.end = parse.end;
-        candidate.name = parse.name;
-        candidate.score = parse.score;
-        candidate.reason = BuildReason(parse);
-        rawCandidates.push_back(candidate);
+            FdpCandidate candidate;
+            candidate.start = start;
+            candidate.end = parse.end;
+            candidate.name = parse.name;
+            candidate.score = parse.score;
+            candidate.reason = BuildReason(parse);
+            rawCandidates.push_back(candidate);
+        }
     }
 
     std::sort(rawCandidates.begin(), rawCandidates.end(), IsBetterCandidate);

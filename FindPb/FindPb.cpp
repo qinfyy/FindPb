@@ -183,6 +183,7 @@ bool WriteWholeFile(const std::filesystem::path& filePath, const uint8_t* data, 
 struct Config {
     std::string processName;    // 进程名（进程模式）
     std::string filePath;       // 文件路径（文件模式）
+    std::string outputDir;      // 导出目录（文件模式）
     std::string moduleName;     // 模块名（模块模式）
     std::string scanMode;       // 扫描模式: heap / memory / module
     bool showUsage = false;
@@ -204,26 +205,31 @@ bool ParseArgs(int argc, char* argv[], Config& cfg)
         else if (arg == "-p" || arg == "--process")
         {
             if (i + 1 < argc) cfg.processName = argv[++i];
-            else { std::cerr << "Error: " << arg << " requires a value\n"; return false; }
+            else { std::cerr << "错误: " << arg << " 需要一个进程名\n"; return false; }
         }
         else if (arg == "-f" || arg == "--file")
         {
             if (i + 1 < argc) cfg.filePath = argv[++i];
-            else { std::cerr << "Error: " << arg << " requires a value\n"; return false; }
+            else { std::cerr << "错误: " << arg << " 需要一个文件路径\n"; return false; }
         }
         else if (arg == "-m" || arg == "--mode")
         {
             if (i + 1 < argc) cfg.scanMode = argv[++i];
-            else { std::cerr << "Error: " << arg << " requires a value\n"; return false; }
+            else { std::cerr << "错误: " << arg << " 需要一个扫描模式\n"; return false; }
+        }
+        else if (arg == "-o" || arg == "--out-dir" || arg == "--output-dir")
+        {
+            if (i + 1 < argc) cfg.outputDir = argv[++i];
+            else { std::cerr << "错误: " << arg << " 需要一个导出目录\n"; return false; }
         }
         else if (arg == "--module")
         {
             if (i + 1 < argc) cfg.moduleName = argv[++i];
-            else { std::cerr << "Error: " << arg << " requires a value\n"; return false; }
+            else { std::cerr << "错误: " << arg << " 需要一个模块名\n"; return false; }
         }
         else
         {
-            std::cerr << "Error: unknown argument: " << arg << "\n";
+            std::cerr << "错误: 未知参数: " << arg << "\n";
             return false;
         }
     }
@@ -231,14 +237,20 @@ bool ParseArgs(int argc, char* argv[], Config& cfg)
     // 验证：必须指定进程或文件之一
     if (cfg.processName.empty() && cfg.filePath.empty())
     {
-        std::cerr << "Error: must specify --process or --file\n";
+        std::cerr << "错误: 必须指定 --process 或 --file\n";
         return false;
     }
 
     // 验证模式
     if (cfg.scanMode != "heap" && cfg.scanMode != "memory" && cfg.scanMode != "module")
     {
-        std::cerr << "Error: --mode must be heap, memory, or module\n";
+        std::cerr << "错误: --mode 必须是 heap、memory 或 module\n";
+        return false;
+    }
+
+    if (!cfg.outputDir.empty() && cfg.filePath.empty())
+    {
+        std::cerr << "错误: --out-dir 只能和 --file 一起使用\n";
         return false;
     }
 
@@ -247,15 +259,16 @@ bool ParseArgs(int argc, char* argv[], Config& cfg)
 
 void ShowUsage(const char* exeName)
 {
-    std::cout << "Usage:\n"
+    std::cout << "用法:\n"
         << "  " << exeName << " --process <name> [--mode heap|memory|module] [--module <name>]\n"
-        << "  " << exeName << " --file <path>\n"
-        << "\nOptions:\n"
-        << "  -p, --process <name>   Target process name (e.g. StellaSora.exe)\n"
-        << "  -f, --file <path>      Target file path\n"
-        << "  -m, --mode <mode>      Scan mode for process: heap, memory, module (default: heap)\n"
-        << "      --module <name>    Module name for module mode (* for all modules)\n"
-        << "  -h, --help             Show this help\n";
+        << "  " << exeName << " --file <path> [--out-dir <dir>]\n"
+        << "\n选项:\n"
+        << "  -p, --process <name>   目标进程名，例如 StellaSora.exe\n"
+        << "  -f, --file <path>      目标文件路径\n"
+        << "  -o, --out-dir <dir>    FDP 导出目录，默认当前运行目录\n"
+        << "  -m, --mode <mode>      进程扫描模式: heap、memory、module，默认 heap\n"
+        << "      --module <name>    模块模式的模块名，* 表示全部模块\n"
+        << "  -h, --help             显示帮助\n";
 }
 
 int main(int argc, char* argv[])
@@ -297,15 +310,27 @@ int main(int argc, char* argv[])
         std::cout << "找到可恢复的 FileDescriptorProto: " << candidates.size() << " 个\n\n";
 
         std::filesystem::path inputPath(cfg.filePath);
+        std::filesystem::path outputDir = cfg.outputDir.empty() ?
+            std::filesystem::current_path() :
+            std::filesystem::path(cfg.outputDir);
         size_t exportedCount = 0;
+
+        std::error_code fsError;
+        std::filesystem::create_directories(outputDir, fsError);
+        if (fsError)
+        {
+            std::cout << "创建导出目录失败: " << outputDir.string() << "\n";
+            return 1;
+        }
 
         for (size_t i = 0; i < candidates.size(); ++i)
         {
             const auto& candidate = candidates[i];
             size_t length = candidate.end - candidate.start;
             std::string safeName = SanitizeFileNamePart(candidate.name);
-            std::filesystem::path outputPath = inputPath;
-            outputPath += ".fdp_" + std::to_string(i) + "_" + safeName + ".bin";
+            std::string outputName = inputPath.filename().string() +
+                ".fdp_" + std::to_string(i) + "_" + safeName + ".bin";
+            std::filesystem::path outputPath = outputDir / outputName;
 
             std::cout << "FileDescriptorProto[" << i << "]\n";
             std::cout << "  名称: " << candidate.name << "\n";
@@ -344,7 +369,6 @@ int main(int argc, char* argv[])
     }
 
     std::cout << "PID: " << pid << "\n";
-    std::cout << "Target: \"" << DEFAULT_TARGET << "\"\n";
     std::cout << "Mode: " << cfg.scanMode << "\n\n";
 
     HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
@@ -355,16 +379,6 @@ int main(int argc, char* argv[])
     }
 
     std::vector<uintptr_t> results;
-
-    if (cfg.scanMode == "heap")
-        results = ScanHeapMemory(hProcess, DEFAULT_TARGET);
-    else if (cfg.scanMode == "memory")
-        results = ScanMemory(hProcess, DEFAULT_TARGET);
-    else if (cfg.scanMode == "module")
-    {
-        std::string modName = cfg.moduleName.empty() ? "*" : cfg.moduleName;
-        results = ScanModuleMemory(hProcess, modName, DEFAULT_TARGET);
-    }
 
     for (auto addr : results)
     {

@@ -541,15 +541,18 @@ std::vector<size_t> FindCandidateStartsForName(const std::vector<uint8_t>& data,
     return starts;
 }
 
-ParseResult ParseCandidate(const std::vector<uint8_t>& data, size_t start)
+ParseResult ParseCandidate(const std::vector<uint8_t>& data, size_t start, size_t limit)
 {
     ParseResult result;
+    if (limit > data.size())
+        limit = data.size();
+
     size_t pos = start;
     size_t fields = 0;
 
-    while (pos < data.size())
+    while (pos < limit)
     {
-        auto field = ReadFieldSpan(data, pos, data.size());
+        auto field = ReadFieldSpan(data, pos, limit);
         if (!field.ok)
             break;
 
@@ -572,9 +575,9 @@ ParseResult ParseCandidate(const std::vector<uint8_t>& data, size_t start)
         ++fields;
         pos = field.next;
 
-        if (pos < data.size())
+        if (pos < limit)
         {
-            auto next = ReadFieldSpan(data, pos, data.size());
+            auto next = ReadFieldSpan(data, pos, limit);
             if (!next.ok || LooksLikeExternalTerminator(next.fieldNumber, next.wireType, result.hasName))
                 break;
         }
@@ -592,7 +595,12 @@ ParseResult ParseCandidate(const std::vector<uint8_t>& data, size_t start)
     return result;
 }
 
-bool IsBetterCandidate(const FdpCandidate& left, const FdpCandidate& right)
+ParseResult ParseCandidate(const std::vector<uint8_t>& data, size_t start)
+{
+    return ParseCandidate(data, start, data.size());
+}
+
+bool IsBetterFdpCandidate(const FdpCandidate& left, const FdpCandidate& right)
 {
     if (left.score != right.score)
         return left.score > right.score;
@@ -610,11 +618,88 @@ bool IsOverlapped(const FdpCandidate& left, const FdpCandidate& right)
     return left.start < right.end && right.start < left.end;
 }
 
+bool IsOverlapped(const FdsCandidate& left, const FdsCandidate& right)
+{
+    return left.start < right.end && right.start < left.end;
+}
+
 std::string BuildReason(const ParseResult& parse)
 {
     std::string reason = parse.reason;
     reason += parse.hasMessageLikeField ? "；包含消息/枚举/服务字段" : "；包含 name/package/syntax 弱校验信号";
     return reason;
+}
+
+bool IsValidEmbeddedFdp(const std::vector<uint8_t>& data, size_t start, size_t end)
+{
+    auto parse = ParseCandidate(data, start, end);
+    return parse.end == end && HasAcceptableFdpShape(parse);
+}
+
+FdsCandidate ParseFileDescriptorSetCandidate(const std::vector<uint8_t>& data, size_t start)
+{
+    FdsCandidate candidate;
+    candidate.start = start;
+    candidate.end = start;
+    candidate.reason = "缺少 FileDescriptorSet.file 字段";
+
+    size_t pos = start;
+    while (pos < data.size())
+    {
+        auto field = ReadFieldSpan(data, pos, data.size());
+        if (!field.ok || field.fieldNumber != 1 || field.wireType != 2)
+            break;
+
+        if (!IsValidEmbeddedFdp(data, field.valueStart, field.valueEnd))
+            break;
+
+        ++candidate.fileCount;
+        candidate.end = field.next;
+        candidate.score += 80;
+        pos = field.next;
+    }
+
+    if (candidate.fileCount > 0 && candidate.end > candidate.start)
+        candidate.reason = "FileDescriptorSet.file 列表校验通过";
+
+    return candidate;
+}
+
+std::vector<size_t> FindFdsFieldStartsForEmbeddedFdp(const std::vector<uint8_t>& data, size_t fdpStart)
+{
+    std::vector<size_t> starts;
+    size_t begin = fdpStart > 11 ? fdpStart - 11 : 0;
+
+    for (size_t fieldStart = begin; fieldStart < fdpStart; ++fieldStart)
+    {
+        if (data[fieldStart] != 0x0A)
+            continue;
+
+        auto field = ReadFieldSpan(data, fieldStart, data.size());
+        if (!field.ok || field.fieldNumber != 1 || field.wireType != 2)
+            continue;
+
+        if (field.valueStart == fdpStart)
+            starts.push_back(fieldStart);
+    }
+
+    return starts;
+}
+
+bool IsBetterFdsCandidate(const FdsCandidate& left, const FdsCandidate& right)
+{
+    if (left.score != right.score)
+        return left.score > right.score;
+
+    if (left.fileCount != right.fileCount)
+        return left.fileCount > right.fileCount;
+
+    size_t leftSize = left.end - left.start;
+    size_t rightSize = right.end - right.start;
+    if (leftSize != rightSize)
+        return leftSize > rightSize;
+
+    return left.start < right.start;
 }
 
 } // namespace
@@ -646,9 +731,59 @@ std::vector<FdpCandidate> FindFileDescriptorProtos(const std::vector<uint8_t>& d
         }
     }
 
-    std::sort(rawCandidates.begin(), rawCandidates.end(), IsBetterCandidate);
+    std::sort(rawCandidates.begin(), rawCandidates.end(), IsBetterFdpCandidate);
 
     std::vector<FdpCandidate> selected;
+    for (const auto& candidate : rawCandidates)
+    {
+        bool overlapped = false;
+        for (const auto& existing : selected)
+        {
+            if (IsOverlapped(candidate, existing))
+            {
+                overlapped = true;
+                break;
+            }
+        }
+
+        if (!overlapped)
+            selected.push_back(candidate);
+    }
+
+    std::sort(selected.begin(), selected.end(), [](const auto& left, const auto& right) {
+        return left.start < right.start;
+        });
+
+    return selected;
+}
+
+std::vector<FdsCandidate> FindFileDescriptorSets(const std::vector<uint8_t>& data)
+{
+    std::vector<FdsCandidate> rawCandidates;
+    std::set<size_t> visitedStarts;
+
+    for (size_t fdpNameStart : FindNameKeyPositions(data))
+    {
+        for (size_t fdpStart : FindCandidateStartsForName(data, fdpNameStart))
+        {
+            for (size_t fdsStart : FindFdsFieldStartsForEmbeddedFdp(data, fdpStart))
+            {
+                if (visitedStarts.find(fdsStart) != visitedStarts.end())
+                    continue;
+
+                visitedStarts.insert(fdsStart);
+                auto candidate = ParseFileDescriptorSetCandidate(data, fdsStart);
+                if (candidate.fileCount == 0 || candidate.end <= candidate.start)
+                    continue;
+
+                rawCandidates.push_back(candidate);
+            }
+        }
+    }
+
+    std::sort(rawCandidates.begin(), rawCandidates.end(), IsBetterFdsCandidate);
+
+    std::vector<FdsCandidate> selected;
     for (const auto& candidate : rawCandidates)
     {
         bool overlapped = false;

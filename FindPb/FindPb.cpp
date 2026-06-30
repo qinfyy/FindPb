@@ -265,7 +265,7 @@ void ShowUsage(const char* exeName)
         << "\n选项:\n"
         << "  -p, --process <name>   目标进程名，例如 StellaSora.exe\n"
         << "  -f, --file <path>      目标文件路径\n"
-        << "  -o, --out-dir <dir>    FDP 导出目录，默认当前运行目录\n"
+        << "  -o, --out-dir <dir>    FDP/FDS 导出目录，默认当前运行目录\n"
         << "  -m, --mode <mode>      进程扫描模式: heap、memory、module，默认 heap\n"
         << "      --module <name>    模块模式的模块名，* 表示全部模块\n"
         << "  -h, --help             显示帮助\n";
@@ -299,21 +299,22 @@ int main(int argc, char* argv[])
             return 1;
         }
 
-        auto candidates = FindFileDescriptorProtos(fileData);
+        auto fdpCandidates = FindFileDescriptorProtos(fileData);
+        auto fdsCandidates = FindFileDescriptorSets(fileData);
 
-        if (candidates.empty())
+        if (fdpCandidates.empty() && fdsCandidates.empty())
         {
-            std::cout << "未找到可恢复的 FileDescriptorProto\n";
+            std::cout << "未找到可恢复的 FileDescriptorProto / FileDescriptorSet\n";
             return 0;
         }
 
-        std::cout << "找到可恢复的 FileDescriptorProto: " << candidates.size() << " 个\n\n";
+        std::cout << "找到可恢复的 FileDescriptorProto: " << fdpCandidates.size() << " 个\n";
+        std::cout << "找到可恢复的 FileDescriptorSet: " << fdsCandidates.size() << " 个\n\n";
 
         std::filesystem::path inputPath(cfg.filePath);
         std::filesystem::path outputDir = cfg.outputDir.empty() ?
             std::filesystem::current_path() :
             std::filesystem::path(cfg.outputDir);
-        size_t exportedCount = 0;
 
         std::error_code fsError;
         std::filesystem::create_directories(outputDir, fsError);
@@ -323,9 +324,12 @@ int main(int argc, char* argv[])
             return 1;
         }
 
-        for (size_t i = 0; i < candidates.size(); ++i)
+        size_t exportedFdpCount = 0;
+        size_t exportedFdsCount = 0;
+
+        for (size_t i = 0; i < fdpCandidates.size(); ++i)
         {
-            const auto& candidate = candidates[i];
+            const auto& candidate = fdpCandidates[i];
             size_t length = candidate.end - candidate.start;
             std::string safeName = SanitizeFileNamePart(candidate.name);
             std::string outputName = inputPath.filename().string() +
@@ -352,11 +356,44 @@ int main(int argc, char* argv[])
                 continue;
             }
 
-            ++exportedCount;
+            ++exportedFdpCount;
             std::cout << "  导出: " << outputPath.string() << "\n\n";
         }
 
-        std::cout << "导出完成: " << exportedCount << " / " << candidates.size() << "\n";
+        for (size_t i = 0; i < fdsCandidates.size(); ++i)
+        {
+            const auto& candidate = fdsCandidates[i];
+            size_t length = candidate.end - candidate.start;
+            std::string outputName = inputPath.filename().string() +
+                ".fds_" + std::to_string(i) + "_" + std::to_string(candidate.fileCount) + "_files.bin";
+            std::filesystem::path outputPath = outputDir / outputName;
+
+            std::cout << "FileDescriptorSet[" << i << "]\n";
+            std::cout << "  起始偏移: 0x" << std::hex << candidate.start << std::dec << "\n";
+            std::cout << "  结束偏移: 0x" << std::hex << candidate.end << std::dec << "\n";
+            std::cout << "  长度: " << length << " 字节\n";
+            std::cout << "  文件数量: " << candidate.fileCount << "\n";
+            std::cout << "  分数: " << candidate.score << "\n";
+            std::cout << "  原因: " << candidate.reason << "\n";
+
+            if (candidate.end > fileData.size() || candidate.start >= candidate.end)
+            {
+                std::cout << "  导出失败: 候选范围越界\n\n";
+                continue;
+            }
+
+            if (!WriteWholeFile(outputPath, fileData.data() + candidate.start, length))
+            {
+                std::cout << "  导出失败: " << outputPath.string() << "\n\n";
+                continue;
+            }
+
+            ++exportedFdsCount;
+            std::cout << "  导出: " << outputPath.string() << "\n\n";
+        }
+
+        std::cout << "导出完成: FDP " << exportedFdpCount << " / " << fdpCandidates.size()
+            << "，FDS " << exportedFdsCount << " / " << fdsCandidates.size() << "\n";
         return 0;
     }
 
@@ -364,17 +401,17 @@ int main(int argc, char* argv[])
     DWORD pid = FindProcessId(cfg.processName);
     if (pid == 0)
     {
-        std::cout << "Process not found: " << cfg.processName << "\n";
+        std::cout << "未找到进程: " << cfg.processName << "\n";
         return 0;
     }
 
     std::cout << "PID: " << pid << "\n";
-    std::cout << "Mode: " << cfg.scanMode << "\n\n";
+    std::cout << "模式: " << cfg.scanMode << "\n\n";
 
     HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (!hProcess)
     {
-        std::cout << "OpenProcess failed\n";
+        std::cout << "打开进程失败\n";
         return 0;
     }
 
@@ -382,13 +419,13 @@ int main(int argc, char* argv[])
 
     for (auto addr : results)
     {
-        std::cout << "Found at: 0x" << std::hex << addr << std::dec << "\n";
+        std::cout << "找到位置: 0x" << std::hex << addr << std::dec << "\n";
         HexDump(hProcess, addr, 0, 512);
         std::cout << "\n";
     }
 
     if (results.empty())
-        std::cout << "Not found\n";
+        std::cout << "未找到\n";
 
     CloseHandle(hProcess);
     return 0;
